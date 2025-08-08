@@ -3,6 +3,8 @@ import os, sys, subprocess, time, pathlib
 from datetime import datetime
 
 ROOT = pathlib.Path(__file__).parent.resolve()
+PIPE_DIR = ROOT / "data_pipeline"
+
 STEPS = [
     "scraper_app_store.py",
     "scraper_google_play.py",
@@ -16,11 +18,15 @@ STEPS = [
 if os.getenv("EMBED_AFTER_INGEST", "").lower() in {"1","true","yes"}:
     STEPS.insert(-1, "embed.py")
 
+def resolve(step: str) -> pathlib.Path:
+    p = PIPE_DIR / step
+    return p if p.exists() else (ROOT / step)
+
 def run(step: str):
-    p = ROOT / step
+    p = resolve(step)
     if not p.exists():
         raise SystemExit(f"[pipeline] missing step: {p}")
-    print(f"[pipeline] ▶ {step}")
+    print(f"[pipeline] ▶ {p.relative_to(ROOT)}")
     start = time.time()
     subprocess.run([sys.executable, str(p)], check=True)
     print(f"[pipeline] ✓ {step} ({time.time()-start:.1f}s)")
