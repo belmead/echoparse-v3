@@ -31,54 +31,45 @@ def load_reviews() -> pd.DataFrame:
     logging.info("Loading app store data...")
     frames = []
     if APPLE_CSV.exists():
-        a = pd.read_csv(APPLE_CSV)
-        a["platform"] = "apple"
-        frames.append(a)
+        a = pd.read_csv(APPLE_CSV); a["platform"] = "apple"; frames.append(a)
     if GOOGLE_CSV.exists():
-        g = pd.read_csv(GOOGLE_CSV)
-        g["platform"] = "google"
-        frames.append(g)
+        g = pd.read_csv(GOOGLE_CSV); g["platform"] = "google"; frames.append(g)
     if not frames:
         raise FileNotFoundError(f"No input CSVs found. Expected {APPLE_CSV.name} and/or {GOOGLE_CSV.name}")
 
     df = pd.concat(frames, ignore_index=True)
 
-    id_c = col(df, ["review_id","reviewId","id","guid","uuid"])
-    text_c = col(df, ["review_text","content","text","body","review","comment"])
+    id_c    = col(df, ["review_id","reviewId","id","guid","uuid"])
+    text_c  = col(df, ["review_text","content","text","body","review","comment"])
+    author_c= col(df, ["author_name","userName","author","user","name"])
+    rating_c= col(df, ["rating","score","stars"])
+    date_c  = col(df, ["review_date","at","date","time","updated"])
+    ver_c   = col(df, ["app_version","version","reviewVersion","appVersion"])
     if not id_c or not text_c:
         raise KeyError(f"Missing id/text columns. Have: {list(df.columns)[:20]}")
-
-    # Optional metadata columns with common aliases
-    author_c = col(df, ["author_name","userName","author","user","name"])
-    rating_c = col(df, ["rating","score","stars"])
-    date_c   = col(df, ["review_date","at","date","time","updated"])
-    ver_c    = col(df, ["app_version","version","reviewVersion","appVersion"])
 
     out = pd.DataFrame({
         "platform": df["platform"],
         "review_id": df[id_c].astype(str),
         "review_text": df[text_c].astype(str).str.strip(),
     })
+    out["author_name"] = df[author_c].astype(str) if author_c else ""
+    # ratings → numeric, enforce 1..5 and cast to int
+    if rating_c:
+        out["rating"] = pd.to_numeric(df[rating_c], errors="coerce")
+    else:
+        out["rating"] = pd.Series([None]*len(out), dtype="float")
+    valid = out["rating"].between(1,5)
+    dropped = int((~valid).sum())
+    if dropped:
+        logging.warning(f"Dropping {dropped} rows with invalid ratings")
+    out = out[valid].copy()
+    out["rating"] = out["rating"].astype(int)
 
-    if author_c: out["author_name"] = df[author_c].astype(str)
-    else:        out["author_name"] = ""
-
-    if rating_c: out["rating"] = pd.to_numeric(df[rating_c], errors="coerce").astype("Int64")
-    else:        out["rating"] = pd.Series([None]*len(out), dtype="Int64")
-
-    if date_c:   out["review_date"] = df[date_c].astype(str)
-    else:        out["review_date"] = ""
-
-    if ver_c:    out["app_version"] = df[ver_c].astype(str)
-    else:        out["app_version"] = ""
-
-    # prepared_text == normalized text used for embedding
+    out["review_date"] = df[date_c].astype(str) if date_c else ""
+    out["app_version"] = df[ver_c].astype(str) if ver_c else ""
     out["prepared_text"] = out["review_text"].str.replace(r"\s+", " ", regex=True).str.strip()
-
-    # drop empties and dupes before embedding
-    out = out.dropna(subset=["prepared_text"])
     out = out[out["prepared_text"].str.len() > 0].drop_duplicates(subset=["platform","review_id"])
-
     return out
 
 def _azure_embed(batch: List[str]) -> List[List[float]]:
