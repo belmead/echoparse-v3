@@ -1,153 +1,153 @@
+#!/usr/bin/env python3
 """
-embed.py
+Embeddings pipeline (OpenAI or Azure OpenAI)
 
-This script embeds review data using a hosted OpenAI-compatible model endpoint.
+Inputs (created earlier in the pipeline):
+  - raw_apple_data.csv
+  - raw_google_data.csv
 
-Steps:
-1. Load cleaned data from the Apple and Google CSVs.
-2. Concatenate and format data into a prompt-friendly string.
-3. Send batches of data to an OpenAI-compatible embedding endpoint.
-4. Store the embeddings with the original data in a CSV file.
+Output (consumed by upload_to_supabase.py):
+  - embedded_reviews.csv  (at repo root)
+
+Env (standard OpenAI):
+  OPENAI_API_KEY          (required)
+  OPENAI_URL              (default: https://api.openai.com/v1)
+  OPENAI_EMBED_MODEL      (default: text-embedding-3-small)
+
+Env (Azure OpenAI):
+  OPENAI_API_KEY          (required)
+  OPENAI_URL              (e.g., https://<resource>.openai.azure.com)
+  OPENAI_DEPLOYMENT       (deployment name for the embedding model)
+  OPENAI_API_VERSION      (e.g., 2024-02-01)
+
+Other:
+  EMBED_BATCH_SIZE        (default: 100)
+  EMBED_OUTPUT            (default: embedded_reviews.csv)
 """
 
+import os, sys, json, time, logging, pathlib
+from typing import List
 import pandas as pd
 import requests
-import time
-import logging
-import os
-from dotenv import load_dotenv
 
-# Load environment variables from project root
-load_dotenv('')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# Configuration from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_URL = os.getenv("OPENAI_URL")
-MODEL = os.getenv("OPENAI_MODEL")
-API_VERSION = os.getenv("OPENAI_API_VERSION")
+OPENAI_URL = os.getenv("OPENAI_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
+OPENAI_API_VERSION = os.getenv("OPENAI_API_VERSION")
+BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "100"))
+OUTPUT = pathlib.Path(os.getenv("EMBED_OUTPUT", "embedded_reviews.csv"))
 
-# Non-sensitive configuration
-BATCH_SIZE = 100
+ROOT = pathlib.Path(__file__).resolve().parent.parent  # repo root
+APPLE_CSV = ROOT / "raw_apple_data.csv"
+GOOGLE_CSV = ROOT / "raw_google_data.csv"
 
-# Validate required environment variables
-required_vars = ["OPENAI_API_KEY", "OPENAI_URL"]
-missing_vars = [var for var in required_vars if not os.getenv(var)]
-if missing_vars:
-    raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+def require(cond, msg):
+    if not cond:
+        raise ValueError(msg)
 
-def load_app_store_data():
-    """Load and standardize app store review data."""
-    logger.info("Loading app store data...")
-    
-    google_df = pd.read_csv("clean_google_play.csv")
-    apple_df = pd.read_csv("clean_app_store.csv")
-    
-    # Combine app store data
-    app_df = pd.concat([google_df, apple_df], ignore_index=True)
-    
-    # Add data source metadata
-    app_df['data_source'] = 'app_review'
-    app_df['has_text_content'] = True  # App reviews always have text
-    
-    logger.info(f"Loaded {len(app_df)} app store reviews")
-    return app_df
+def is_azure() -> bool:
+    # If a deployment or api-version is provided, assume Azure. Otherwise detect azure.com in URL.
+    return bool(OPENAI_DEPLOYMENT and OPENAI_API_VERSION) or ("azure.com" in OPENAI_URL)
 
-def prepare_prompts(df):
-    """Prepare text prompts for embedding based on data source."""
-    prepared_texts = []
-    
-    for idx, row in df.iterrows():
-        if row['data_source'] == 'app_review':
-            # Format app review data
-            prompt = (
-                f"platform: {row.get('platform', 'unknown')}. "
-                f"date: {row.get('date', 'unknown')}. "
-                f"rating: {row.get('rating', 'unknown')}. "
-                f"version: {row.get('app_version', 'unknown')}. "
-                f"passage: {row.get('text_content', '')}"
-            )
-        else:
-            # Fallback for unknown data sources
-            prompt = f"content: {row.get('text_content', '')}"
-        
-        prepared_texts.append(prompt)
-    
-    return prepared_texts
+def pick_col(df: pd.DataFrame, candidates: List[str]) -> str:
+    for c in candidates:
+        if c in df.columns:
+            return c
+    raise KeyError(f"None of the columns found: {candidates}  (have: {list(df.columns)[:20]})")
 
-def get_embeddings(batch):
-    """Get embeddings from OpenAI-compatible endpoint."""
-    url = f"{OPENAI_URL}/{MODEL}/embeddings?api-version={API_VERSION}"
-    headers = {
-        "api-key": OPENAI_API_KEY,
-        "Content-Type": "application/json"
-    }
+def load_reviews() -> pd.DataFrame:
+    logging.info("Loading app store data...")
+    frames = []
+    if APPLE_CSV.exists():
+        a = pd.read_csv(APPLE_CSV)
+        a["platform"] = "apple"
+        frames.append(a)
+    if GOOGLE_CSV.exists():
+        g = pd.read_csv(GOOGLE_CSV)
+        g["platform"] = "google"
+        frames.append(g)
+    require(frames, f"No input CSVs found. Expected {APPLE_CSV.name} and/or {GOOGLE_CSV.name}")
+    df = pd.concat(frames, ignore_index=True)
+
+    # Pick text & id columns heuristically
+    text_col = pick_col(df, ["review_text","content","text","body","review","comment"])
+    id_col = pick_col(df, ["review_id","reviewId","id","guid","uuid"])
+    df = df[[ "platform", id_col, text_col ]].rename(columns={id_col:"review_id", text_col:"review_text"})
+    df["review_text"] = df["review_text"].astype(str).str.strip()
+    df = df.dropna(subset=["review_text"])
+    df = df[df["review_text"].str.len()>0].drop_duplicates(subset=["platform","review_id"])
+    logging.info(f"Loaded {len(df):,} reviews after cleaning")
+    return df
+
+def _azure_embed(batch: List[str]) -> List[List[float]]:
+    require(OPENAI_DEPLOYMENT and OPENAI_API_VERSION, "Azure mode requires OPENAI_DEPLOYMENT and OPENAI_API_VERSION")
+    url = f"{OPENAI_URL}/openai/deployments/{OPENAI_DEPLOYMENT}/embeddings"
+    params = {"api-version": OPENAI_API_VERSION}
+    headers = {"api-key": OPENAI_API_KEY, "Content-Type": "application/json"}
     body = {"input": batch}
-    
-    try:
-        response = requests.post(url, headers=headers, json=body)
-        response.raise_for_status()
-        return [item["embedding"] for item in response.json()["data"]]
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error getting embeddings: {e}")
-        raise
+    r = requests.post(url, params=params, headers=headers, json=body, timeout=60)
+    r.raise_for_status()
+    data = r.json()["data"]
+    return [item["embedding"] for item in data]
+
+def _openai_embed(batch: List[str]) -> List[List[float]]:
+    url = f"{OPENAI_URL}/embeddings"
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    body = {"model": OPENAI_EMBED_MODEL, "input": batch}
+    r = requests.post(url, headers=headers, json=body, timeout=60)
+    r.raise_for_status()
+    data = r.json()["data"]
+    return [item["embedding"] for item in data]
+
+def get_embeddings(batch: List[str]) -> List[List[float]]:
+    fn = _azure_embed if is_azure() else _openai_embed
+    delay = 1.0
+    for attempt in range(1, 6):
+        try:
+            return fn(batch)
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else "?"
+            logging.error(f"HTTP {status} getting embeddings (attempt {attempt}/5): {e}")
+            if status in (429, 500, 502, 503, 504):
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+                continue
+            raise
+        except requests.RequestException as e:
+            logging.error(f"Request error (attempt {attempt}/5): {e}")
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+    raise RuntimeError("Failed to fetch embeddings after retries")
 
 def main():
-    """Main embedding pipeline."""
-    logger.info("Starting embedding pipeline...")
-    
-    # Load all data sources
-    app_df = load_app_store_data()
-        
-    # Combine all data
-    all_df = pd.concat([app_df], ignore_index=True, sort=False)
-    logger.info(f"Total records loaded: {len(all_df)}")
-    
-    # Filter to only records that should be embedded
-    embed_df = all_df[all_df['has_text_content'] == True].copy()
-    logger.info(f"Records to embed: {len(embed_df)}")
-    
-    # Prepare prompts for embedding
-    logger.info("Preparing prompts...")
-    embed_df['prepared_text'] = prepare_prompts(embed_df)
-    
-    # Generate embeddings in batches
-    logger.info("Generating embeddings...")
-    all_embeddings = []
-    
-    for i in range(0, len(embed_df), BATCH_SIZE):
-        batch_texts = embed_df["prepared_text"].iloc[i:i + BATCH_SIZE].tolist()
-        batch_num = (i // BATCH_SIZE) + 1
-        total_batches = (len(embed_df) + BATCH_SIZE - 1) // BATCH_SIZE
-        
-        logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch_texts)} items)...")
-        
-        try:
-            embeddings = get_embeddings(batch_texts)
-            all_embeddings.extend(embeddings)
-            
-            # Rate limiting
-            time.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"Failed to process batch {batch_num}: {e}")
-            raise
-    
-    # Add embeddings to dataframe
-    embed_df['embedding'] = all_embeddings
-    
-    # Save embedded records
-    embed_df.to_csv("embedded_reviews.csv", index=False)
-    logger.info(f"Saved {len(embed_df)} embedded records to embedded_reviews.csv")
-    
-    # Summary statistics
-    logger.info("\n=== EMBEDDING SUMMARY ===")
-    logger.info(f"Total records processed: {len(all_df)}")
-    logger.info(f"App reviews embedded: {len(embed_df[embed_df['data_source'] == 'app_review'])}")
-    logger.info("Embedding pipeline completed successfully!")
+    require(OPENAI_API_KEY, "Missing OPENAI_API_KEY")
+    df = load_reviews()
+    total = len(df)
+    logging.info(f"Total records to embed: {total:,}")
+    texts = df["review_text"].tolist()
+
+    all_vectors: List[List[float]] = []
+    for i in range(0, total, BATCH_SIZE):
+        batch = texts[i:i+BATCH_SIZE]
+        logging.info(f"Processing batch {i//BATCH_SIZE + 1}/{(total + BATCH_SIZE - 1)//BATCH_SIZE} ({len(batch)} items)...")
+        vectors = get_embeddings(batch)
+        if len(vectors) != len(batch):
+            raise RuntimeError(f"Embedding count mismatch: got {len(vectors)} for {len(batch)} inputs")
+        all_vectors.extend(vectors)
+
+    # Attach back to df and write CSV
+    df = df.reset_index(drop=True)
+    df["embedding"] = [json.dumps(v) for v in all_vectors]
+    OUTPUT_PATH = ROOT / OUTPUT  # repo root
+    df.to_csv(OUTPUT_PATH, index=False)
+    logging.info(f"✓ Wrote embeddings to {OUTPUT_PATH}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logging.error(f"Embedding pipeline failed: {e}")
+        raise
