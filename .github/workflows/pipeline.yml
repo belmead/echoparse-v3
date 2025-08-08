@@ -1,0 +1,44 @@
+name: EchoParse Pipeline (6h)
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # every 6 hours (UTC)
+  workflow_dispatch:        # allow manual runs
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: echoparse-pipeline
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}   # psycopg2 uses this
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }} # only needed if embed.py runs
+          EMBED_AFTER_INGEST: "false"
+        run: |
+          python run_pipeline.py
+
+      - name: Upload artifacts (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-reviews
+          path: artifacts/*.csv
+          if-no-files-found: ignore
