@@ -1,45 +1,55 @@
-// api/live-ratings.ts
-import { createClient } from '@supabase/supabase-js';
-const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_KEY!);
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import axios from 'axios';
 
-export default async function handler(req: any, res: any) {
-  const { data: apple, error: appleErr } = await supabase
-    .from('app_reviews')
-    .select('rating')
-    .eq('platform', 'apple');
-  const { data: google, error: googleErr } = await supabase
-    .from('app_reviews')
-    .select('rating')
-    .eq('platform', 'google');
+// These need to be set in your Vercel server environment.
+const APPLE_APP_ID = process.env.APPLE_APP_ID;
+const GOOGLE_PACKAGE_ID = process.env.GOOGLE_PACKAGE_ID;
 
-  if (appleErr || googleErr) {
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  try {
+    // Fetch the live rating from the App Store using Apple’s lookup API
+    let appleRating: number | null = null;
+    if (APPLE_APP_ID) {
+      const appleResp = await axios.get('https://itunes.apple.com/lookup', {
+        params: { id: APPLE_APP_ID },
+      });
+      const result = appleResp.data?.results?.[0];
+      if (result && result.averageUserRating) {
+        appleRating = result.averageUserRating;
+      }
+    }
+
+    // Fetch the live rating from Google Play by scraping the app’s page
+    let googleRating: number | null = null;
+    if (GOOGLE_PACKAGE_ID) {
+      const googleResp = await axios.get('https://play.google.com/store/apps/details', {
+        params: { id: GOOGLE_PACKAGE_ID, hl: 'en', gl: 'US' },
+      });
+      const match = googleResp.data.match(/<div[^>]*class="BHMmbe"[^>]*>([0-9.]+)<\\/?div>/);
+      if (match) {
+        googleRating = parseFloat(match[1]);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        app_store_live: {
+          value: appleRating !== null ? appleRating.toFixed(2) : 'N/A',
+          raw_value: appleRating,
+          scale: '5',
+        },
+        play_store_live: {
+          value: googleRating !== null ? googleRating.toFixed(2) : 'N/A',
+          raw_value: googleRating,
+          scale: '5',
+        },
+      },
+    });
+  } catch (err: any) {
     return res.status(500).json({
       success: false,
-      error: (appleErr?.message || googleErr?.message),
+      error: (err as Error).message,
     });
   }
-
-  const avg = (arr: any[] | null) =>
-    arr && arr.length > 0
-      ? arr.reduce((acc, row) => acc + Number(row.rating || 0), 0) / arr.length
-      : null;
-
-  const avgApple = avg(apple);
-  const avgGoogle = avg(google);
-
-  return res.status(200).json({
-    success: true,
-    data: {
-      app_store_live: {
-        value: avgApple !== null ? avgApple.toFixed(2) : 'N/A',
-        raw_value: avgApple,
-        scale: '5',
-      },
-      play_store_live: {
-        value: avgGoogle !== null ? avgGoogle.toFixed(2) : 'N/A',
-        raw_value: avgGoogle,
-        scale: '5',
-      },
-    },
-  });
 }
