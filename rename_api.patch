@@ -1,0 +1,10 @@
+diff --git a/api/live-scores.ts b/api_disabled/live-scores.ts
+similarity index 100%
+rename from api/live-scores.ts
+rename to api_disabled/live-scores.ts
+
+
+diff --git a/api/main.py b/api_disabled/main.py
+similarity index 100%
+rename from api/main.py
+rename to api_disabled/main.py
