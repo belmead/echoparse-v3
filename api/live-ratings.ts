@@ -1,7 +1,6 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import axios from 'axios';
 
-// These need to be set in your Vercel server environment.
 const APPLE_APP_ID = process.env.APPLE_APP_ID;
 const GOOGLE_PACKAGE_ID = process.env.GOOGLE_PACKAGE_ID;
 
@@ -9,7 +8,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let appleRating: number | null = null;
   let googleRating: number | null = null;
 
-  // Fetch the live rating from the App Store using Apple’s lookup API
+  // Apple rating via iTunes lookup API
   if (APPLE_APP_ID) {
     try {
       const appleResp = await axios.get('https://itunes.apple.com/lookup', {
@@ -20,22 +19,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         appleRating = result.averageUserRating;
       }
     } catch {
-      // if the request fails, leave appleRating as null
+      // ignore Apple errors
     }
   }
 
-  // Fetch the live rating from Google Play by scraping the app’s page
+  // Google rating via scraping the Play store page
   if (GOOGLE_PACKAGE_ID) {
     try {
-      const googleResp = await axios.get('https://play.google.com/store/apps/details', {
+      const resp = await axios.get('https://play.google.com/store/apps/details', {
         params: { id: GOOGLE_PACKAGE_ID, hl: 'en', gl: 'US' },
       });
-      const match = googleResp.data.match(/<div[^>]*class="BHMmbe"[^>]*>([0-9.]+)<\/div>/);
+      // Look for "<number> star" in the raw HTML
+      const match = resp.data.match(/([0-9.]+)\s*star/);
       if (match) {
         googleRating = parseFloat(match[1]);
       }
     } catch {
-      // if the request fails, leave googleRating as null
+      // ignore Google errors
     }
   }
 
