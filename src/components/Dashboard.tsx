@@ -60,7 +60,7 @@ const Dashboard: React.FC = () => {
 
   const fetchMetrics = async () => {
     try {
-      const response = await fetch('http://localhost:8000/metrics');
+      const response = await fetch('/api/metrics');
       const result: ApiResponse<DashboardMetrics> = await response.json();
       
       if (result.success) {
@@ -77,7 +77,7 @@ const Dashboard: React.FC = () => {
 
   const fetchLiveRatings = async () => {
     try {
-      const response = await fetch('http://localhost:8000/live-ratings');
+      const response = await fetch('/api/live-ratings');
       const result: ApiResponse<LiveRatings> = await response.json();
       
       if (result.success) {
