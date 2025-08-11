@@ -21,6 +21,7 @@ import logging
 from typing import List, Dict, Any
 import subprocess
 import sys
+from pathlib import Path  # NEW import
 
 # Load environment variables
 load_dotenv()
@@ -57,8 +58,10 @@ def load_embedded_data(csv_file: str) -> pd.DataFrame:
         logger.info(f"Loaded {len(df)} rows from {csv_file}")
         
         # Validate required columns exist
-        required_columns = ['author_name', 'rating', 'review_text', 'review_date', 
-                          'app_version', 'platform', 'prepared_text', 'embedding']
+        required_columns = [
+            'author_name', 'rating', 'review_text', 'review_date', 
+            'app_version', 'platform', 'prepared_text', 'embedding'
+        ]
         
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
@@ -95,7 +98,7 @@ def clear_app_reviews_table(connection):
         raise
 
 def upload_reviews_batch(connection, df: pd.DataFrame, batch_size: int = 1000):
-    """Upload reviews to Suibase in batches"""
+    """Upload reviews to Supabase in batches"""
     try:
         cursor = connection.cursor()
         
@@ -203,14 +206,19 @@ def verify_upload(connection) -> Dict[str, Any]:
 def calculate_dashboard_metrics():
     """Run the calculate_metrics.py script to update dashboard metrics"""
     try:
-        # Check if calculate_metrics.py exists
-        if not os.path.exists("calculate_metrics.py"):
-            logger.warning("calculate_metrics.py not found. Skipping metrics calculation.")
+        # Determine the path to calculate_metrics.py relative to this file
+        metrics_script = Path(__file__).parent / "calculate_metrics.py"
+        if not metrics_script.exists():
+            logger.warning(f"{metrics_script} not found. Skipping metrics calculation.")
             return
         
         # Run the metrics calculation script
-        result = subprocess.run([sys.executable, "calculate_metrics.py"], 
-                              capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            [sys.executable, str(metrics_script)],
+            capture_output=True,
+            text=True,
+            check=True
+        )
         
         # Log the output from the metrics script
         if result.stdout:
@@ -218,7 +226,7 @@ def calculate_dashboard_metrics():
                 logger.info(f"METRICS: {line}")
                 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Error running calculate_metrics.py: {e}")
+        logger.error(f"Error running {metrics_script}: {e}")
         if e.stderr:
             logger.error(f"METRICS ERROR: {e.stderr}")
         raise
@@ -237,7 +245,9 @@ def main():
             # Try the edited version if it exists
             csv_file = "embedded_reviews_edited.csv"
             if not os.path.exists(csv_file):
-                raise FileNotFoundError(f"Embedded CSV file not found. Expected 'embedded_reviews.csv' or 'embedded_reviews_edited.csv'")
+                raise FileNotFoundError(
+                    "Embedded CSV file not found. Expected 'embedded_reviews.csv' or 'embedded_reviews_edited.csv'"
+                )
         
         df = load_embedded_data(csv_file)
         
@@ -264,7 +274,9 @@ def main():
         logger.info("\n=== UPLOAD SUMMARY ===")
         logger.info(f"Total rows uploaded: {verification['total_rows']}")
         logger.info(f"Platform breakdown: {verification['platform_counts']}")
-        logger.info(f"Date range: {verification['date_range']['earliest']} to {verification['date_range']['latest']}")
+        logger.info(
+            f"Date range: {verification['date_range']['earliest']} to {verification['date_range']['latest']}"
+        )
         logger.info("Upload completed successfully!")
         
         # Automatically calculate dashboard metrics
@@ -273,7 +285,6 @@ def main():
         logger.info("✅ Dashboard metrics updated successfully!")
         
     except Exception as e:
-
         logger.error(f"Upload failed: {e}")
         raise
 
